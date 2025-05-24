@@ -27,5 +27,5 @@
       "@/*" :  ["./*"]
     }
   },
-  "include": ["src", "electron/main.ts", "electron/preload.ts"]
+  "include": ["src", "electron", "index.tsx", "vite.config.ts", "types.ts", "constants.ts"]
 }
