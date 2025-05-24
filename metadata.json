@@ -1,0 +1,6 @@
+{
+  "name": "HeroForge",
+  "description": "A web application to create Dungeons & Dragons 5th Edition characters, with AI-powered backstory and name suggestions, and AI content generation.",
+  "requestFramePermissions": [],
+  "prompt": ""
+}
