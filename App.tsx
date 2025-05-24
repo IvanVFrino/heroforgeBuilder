@@ -1,9 +1,8 @@
-
-
 import React, { useState, useEffect, useCallback } from 'react';
-import { CharacterData, Race, Subrace, CharClass, Background, AbilityScores, ABILITY_NAMES, Ability, Skill, CommonGameData, AppView, AiCharacterSaveDestination, HeroForgeSessionData, AbilityScoreAssignmentMethod } from './types';
+import { CharacterData, Race, Subrace, CharClass, Background, AbilityScores, ABILITY_NAMES, Ability, Skill, CommonGameData, AppView, AiCharacterSaveDestination, HeroForgeSessionData, AbilityScoreAssignmentMethod, BestiaryEntry } from './types';
 import { generateBackstory, suggestCharacterNames } from './services/geminiService';
-import { generateCharacterId } from './services/localStorageService'; 
+import { generateCharacterId } from './services/localStorageService';
+import { electronAppService } from './services/electronAppService'; // Added
 import AbilityScoreAllocator from './components/AbilityScoreAllocator';
 import CharacterSheetDisplay from './components/CharacterSheetDisplay';
 import LoadingSpinner from './components/LoadingSpinner';
@@ -17,7 +16,7 @@ import { POINT_BUY_CONFIG, MANUAL_ROLL_CONFIG, DEFAULT_SCORES_FOR_MANUAL_ROLL, D
 
 const TOTAL_CREATION_STEPS = 7;
 const DEFAULT_IMAGE_URL = 'https://via.placeholder.com/300x400/a29bfe/FFFFFF?text=Hero';
-const APP_VERSION = "1.0.0"; // For session data versioning
+const APP_VERSION = "1.0.0"; 
 
 const getAbilityModifier = (score: number): number => Math.floor((score - 10) / 2);
 
@@ -46,12 +45,12 @@ const mergeRaceAndSubrace = (baseRace: Race, subrace: Subrace): Race => {
     abilityScoreBonuses: mergedBonuses,
     traits: mergedTraits,
     hasPerceptionProficiencyTrait: baseRace.hasPerceptionProficiencyTrait,
-    source: baseRace.source, 
+    source: baseRace.source,
   };
 };
 
 const App: React.FC = () => {
-  const [currentView, setCurrentView] = useState<AppView>('initialLoad'); // Start with initial load
+  const [currentView, setCurrentView] = useState<AppView>('initialLoad');
   const [currentCreationStep, setCurrentCreationStep] = useState(1);
   
   const [baseRacesData, setBaseRacesData] = useState<Race[]>([]);
@@ -61,7 +60,7 @@ const App: React.FC = () => {
   const [aiRacesData, setAiRacesData] = useState<Race[]>([]);
   const [aiClassesData, setAiClassesData] = useState<CharClass[]>([]);
   const [aiBackgroundsData, setAiBackgroundsData] = useState<Background[]>([]);
-  const [aiBestiaryEntries, setAiBestiaryEntries] = useState<CharacterData[]>([]);
+  const [aiBestiaryEntries, setAiBestiaryEntries] = useState<BestiaryEntry[]>([]);
 
   const [racesData, setRacesData] = useState<Race[]>([]);
   const [classesData, setClassesData] = useState<CharClass[]>([]);
@@ -74,11 +73,11 @@ const App: React.FC = () => {
   const [character, setCharacter] = useState<CharacterData>(createInitialCharacterData());
   const [abilityScoreAssignmentMethod, setAbilityScoreAssignmentMethod] = useState<AbilityScoreAssignmentMethod>('standardArray');
 
-
   const [savedCharacters, setSavedCharacters] = useState<CharacterData[]>([]); 
   const [selectedCharacterForView, setSelectedCharacterForView] = useState<CharacterData | null>(null);
 
-  const [isLoadingStaticData, setIsLoadingStaticData] = useState(true); // For fetching common.json etc.
+  const [isLoadingStaticData, setIsLoadingStaticData] = useState(true);
+  const [isLoadingLocalData, setIsLoadingLocalData] = useState(true); // For electronAppService loading
   const [isLoadingAI, setIsLoadingAI] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [suggestedNames, setSuggestedNames] = useState<string[]>([]);
@@ -91,7 +90,7 @@ const App: React.FC = () => {
       id: generateCharacterId(), 
       name: '',
       level: 1,
-      abilityScores: effectiveCommonData ? { ...effectiveCommonData.DEFAULT_ABILITY_SCORES } : { Strength: 0, Dexterity: 0, Constitution: 0, Intelligence: 0, Wisdom: 0, Charisma: 0 }, // All 0s initially
+      abilityScores: effectiveCommonData ? { ...effectiveCommonData.DEFAULT_ABILITY_SCORES } : { Strength: 0, Dexterity: 0, Constitution: 0, Intelligence: 0, Wisdom: 0, Charisma: 0 },
       finalAbilityScores: effectiveCommonData ? { ...effectiveCommonData.DEFAULT_ABILITY_SCORES } : { Strength: 0, Dexterity: 0, Constitution: 0, Intelligence: 0, Wisdom: 0, Charisma: 0 },
       availableScores: effectiveCommonData ? [...effectiveCommonData.STANDARD_ARRAY_SCORES].sort((a,b) => b-a) : [],
       proficientSkills: [],
@@ -102,11 +101,15 @@ const App: React.FC = () => {
     };
   }
   
-  // Load static game data (non-user specific)
+  // Effect for loading ALL data (static first, then local user data)
   useEffect(() => {
-    const loadStaticGameData = async () => {
+    const loadAllData = async () => {
       setIsLoadingStaticData(true);
+      setIsLoadingLocalData(true);
+      setApiError(null);
+
       try {
+        // Load static game data
         const [racesRes, classesRes, backgroundsRes, skillsRes, alignmentsRes, commonRes] = await Promise.all([
           fetch('public/data/races.json').then(res => res.json()),
           fetch('public/data/classes.json').then(res => res.json()),
@@ -119,71 +122,101 @@ const App: React.FC = () => {
         setBaseRacesData(racesRes.map((r: Race) => ({ ...r, source: 'base' })));
         setBaseClassesData(classesRes.map((c: CharClass) => ({ ...c, source: 'base' })));
         setBaseBackgroundsData(backgroundsRes.map((b: Background) => ({ ...b, source: 'base' })));
-        
         setSkillsData(skillsRes);
         setAlignmentsData(alignmentsRes);
         const loadedCommonData = commonRes as CommonGameData;
         setCommonData(loadedCommonData);
+        setCharacter(createInitialCharacterData(loadedCommonData)); // Initialize character with common data
+        setIsLoadingStaticData(false);
         
-        setCharacter(createInitialCharacterData(loadedCommonData)); 
+        // Static data loaded, now load user data from electronAppService
+        try {
+          await electronAppService.ensureDataDirs();
+          const [loadedChars, loadedAiRaces, loadedAiClasses, loadedAiBackgrounds, loadedAiBestiary] = await Promise.all([
+            electronAppService.loadCharacters(),
+            electronAppService.loadAiRaces(),
+            electronAppService.loadAiClasses(),
+            electronAppService.loadAiBackgrounds(),
+            electronAppService.loadAiBestiaryEntries()
+          ]);
 
-      } catch (error) {
-        console.error("Failed to load static game data:", error);
-        setApiError("Failed to load essential game data. Please refresh the page.");
+          setSavedCharacters(loadedChars.map(c => ({ ...c, source: c.source || 'pc-gallery-ai' })));
+          setAiRacesData(loadedAiRaces.map(r => ({ ...r, source: r.source || 'user-ai' })));
+          setAiClassesData(loadedAiClasses.map(c => ({ ...c, source: c.source || 'user-ai' })));
+          setAiBackgroundsData(loadedAiBackgrounds.map(b => ({ ...b, source: b.source || 'user-ai' })));
+          setAiBestiaryEntries(loadedAiBestiary.map(e => ({ ...e, source: e.source || 'bestiary-ai' })));
+          console.log('User data loaded from local file system.');
+        } catch (localError: any) {
+          console.error("Failed to load user data via Electron service:", localError);
+          setApiError(`Failed to load your saved data: ${localError.message || 'Unknown error'}. Some items may be missing.`);
+        }
+        setIsLoadingLocalData(false);
+        setCurrentView('menu'); // Proceed to menu after attempting to load all data
+
+      } catch (staticError: any) {
+        console.error("Failed to load static game data:", staticError);
+        setApiError(`Failed to load essential game data: ${staticError.message || 'Unknown error'}. Please refresh the page.`);
+        setIsLoadingStaticData(false);
+        setIsLoadingLocalData(false); // Also stop local loading if static fails
+        // Potentially set view to an error state or allow retry
       }
-      setIsLoadingStaticData(false);
     };
-    loadStaticGameData();
-  }, []);
 
-  const initializeWithFreshData = () => {
+    if (currentView === 'initialLoad') {
+        loadAllData();
+    }
+  }, [currentView]); // Only re-run if currentView changes to 'initialLoad' (e.g. app restart)
+
+
+  const initializeWithFreshData = async () => {
+    if (!window.confirm("Are you sure you want to start fresh? This will clear current session data but will NOT delete your saved files. You can load them again next time.")) {
+        return;
+    }
     setSavedCharacters([]);
     setAiRacesData([]);
     setAiClassesData([]);
     setAiBackgroundsData([]);
     setAiBestiaryEntries([]);
-    if(commonData) resetCreator(commonData); // Reset creator state as well
+    if(commonData) resetCreator(commonData);
     setCurrentView('menu');
   };
 
-  const handleSessionDataLoaded = (data: HeroForgeSessionData) => {
-    setSavedCharacters(data.savedCharacters.map(c => ({...c, source: c.source || 'pc-gallery-ai'})) || []); 
+  const handleSessionBackupFileLoaded = (data: HeroForgeSessionData) => { // Renamed from onDataLoaded
+    if (!window.confirm("Loading this session backup file will overwrite your current session data (but not your individually saved files). Are you sure?")) {
+        return;
+    }
+    setSavedCharacters(data.savedCharacters.map(c => ({...c, source: c.source || 'pc-gallery-ai'})) || []);
     setAiRacesData(data.aiGeneratedRaces.map(r => ({...r, source: 'user-ai'})) || []);
     setAiClassesData(data.aiGeneratedClasses.map(c => ({...c, source: 'user-ai'})) || []);
     setAiBackgroundsData(data.aiGeneratedBackgrounds.map(b => ({...b, source: 'user-ai'})) || []);
     setAiBestiaryEntries(data.aiGeneratedBestiaryEntries.map(e => ({...e, source: 'bestiary-ai'})) || []);
-    if(commonData) resetCreator(commonData); // Reset any in-progress character
+    if(commonData) resetCreator(commonData);
     setCurrentView('menu');
+    alert("Session data from file loaded. This will not overwrite individual saved files unless you save these items again.");
   };
-
+  
   useEffect(() => { setRacesData([...baseRacesData, ...aiRacesData]); }, [baseRacesData, aiRacesData]);
   useEffect(() => { setClassesData([...baseClassesData, ...aiClassesData]); }, [baseClassesData, aiClassesData]);
   useEffect(() => { setBackgroundsData([...baseBackgroundsData, ...aiBackgroundsData]); }, [baseBackgroundsData, aiBackgroundsData]);
   
   useEffect(() => {
     if (!commonData) return;
-
     const newFinalScores = calculateFinalAbilityScores(character.abilityScores, character.race?.abilityScoreBonuses);
     let hp = character.charClass ? character.charClass.hitDie + getAbilityModifier(newFinalScores.Constitution) : (character.hitPoints || 0);
-    if (character.race?.name?.toLowerCase().includes("hill dwarf")) { // Dwarven Toughness for Hill Dwarf
+    if (character.race?.name?.toLowerCase().includes("hill dwarf")) { 
         hp += character.level;
     }
     let ac = character.armorClass || (10 + getAbilityModifier(newFinalScores.Dexterity));
     const proficientSavingThrows = character.charClass?.savingThrowProficiencies || character.proficientSavingThrows || [];
-    
-    let allProficientSkills: string[] = []; // Start fresh to avoid duplicates if background/class changes
-    if (character.race?.hasPerceptionProficiencyTrait) { // e.g. Keen Senses for Elves
+    let allProficientSkills: string[] = [];
+    if (character.race?.hasPerceptionProficiencyTrait) {
       allProficientSkills.push("Perception");
     }
     if (character.background) {
       allProficientSkills.push(...character.background.skillProficiencies);
     }
-    allProficientSkills.push(...selectedSkillChoices); // From class selection
-    
-    // Ensure selected skills from class don't duplicate background/race ones before adding to character
+    allProficientSkills.push(...selectedSkillChoices);
     const uniqueProficientSkills = [...new Set(allProficientSkills)];
-
-
     setCharacter(prev => ({
       ...prev,
       finalAbilityScores: newFinalScores,
@@ -193,13 +226,13 @@ const App: React.FC = () => {
       proficientSkills: uniqueProficientSkills,
       proficiencyBonus: prev.proficiencyBonus || commonData.PROFICIENCY_BONUS_LEVEL_1,
     }));
-  }, [character.abilityScores, character.race, character.charClass, character.background, selectedSkillChoices, commonData, character.level, character.hitPoints, character.armorClass]); // Added character.level for HP recalc for Hill Dwarf
+  }, [character.abilityScores, character.race, character.charClass, character.background, selectedSkillChoices, commonData, character.level, character.hitPoints, character.armorClass]);
 
   const updateCharacter = useCallback(<K extends keyof CharacterData>(key: K, value: CharacterData[K]) => {
     setCharacter(prev => ({ ...prev, [key]: value }));
   }, []);
 
-  const downloadJson = (data: any, filename: string) => {
+  const downloadJson = (data: any, filename: string) => { // For session backup
     const jsonStr = JSON.stringify(data, null, 2);
     const blob = new Blob([jsonStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -212,12 +245,11 @@ const App: React.FC = () => {
     URL.revokeObjectURL(url);
   };
 
-  const handleSaveCharacter = () => {
+  const handleSaveCharacter = async () => {
     if (!character.race || !character.charClass || !character.background) {
       alert("Please complete all core selections (Race, Class, Background) before saving.");
       return;
     }
-    // Validate ability scores one last time based on method
     if (abilityScoreAssignmentMethod === 'standardArray' && character.availableScores.length > 0) {
       alert("Standard Array: Please assign all standard array ability scores before saving."); return;
     }
@@ -233,33 +265,48 @@ const App: React.FC = () => {
          alert(`Point Buy: All base ability scores must be between ${POINT_BUY_CONFIG.minScore} and ${POINT_BUY_CONFIG.maxScore}.`); return;
       }
     }
-
-
     const characterToSave: CharacterData = {
       ...character,
       imageUrl: character.imageUrl || DEFAULT_IMAGE_URL,
       source: 'pc-gallery-ai' 
     };
-    
-    const filename = `${characterToSave.name.replace(/\s+/g, '_') || 'character'}_${characterToSave.id}.json`;
-    downloadJson(characterToSave, filename);
-    
-    setSavedCharacters(prev => [...prev, characterToSave]); 
-    alert(`${characterToSave.name || "Character"} data prepared for download as ${filename}. Also added to current session gallery.`);
-    setCurrentView('gallery');
-    resetCreator(); // Reset after saving
+    try {
+      await electronAppService.saveCharacter(characterToSave);
+      setSavedCharacters(prev => {
+        const existingIndex = prev.findIndex(c => c.id === characterToSave.id);
+        if (existingIndex > -1) {
+          const updated = [...prev];
+          updated[existingIndex] = characterToSave;
+          return updated;
+        }
+        return [...prev, characterToSave];
+      });
+      alert(`${characterToSave.name || "Character"} saved to your local data. Also added to current session gallery.`);
+      setCurrentView('gallery');
+      resetCreator(); 
+    } catch (error: any) {
+      console.error("Failed to save character:", error);
+      setApiError(`Failed to save character: ${error.message || 'Unknown error'}`);
+    }
   };
 
-  const handleDeleteCharacter = (characterId: string) => {
-    if (window.confirm("Are you sure you want to remove this character from the current gallery session? This won't delete any downloaded files. Remember to save your session if you want this removal to persist.")) {
-      setSavedCharacters(prev => prev.filter(c => c.id !== characterId));
-      if (selectedCharacterForView?.id === characterId) {
-        setSelectedCharacterForView(null);
+  const handleDeleteCharacter = async (characterId: string) => {
+    if (window.confirm("Are you sure you want to remove this character from the gallery and delete its local file? This action cannot be undone. Remember to save your session if you want this removal to persist for other data.")) {
+      try {
+        await electronAppService.deleteCharacter(characterId);
+        setSavedCharacters(prev => prev.filter(c => c.id !== characterId));
+        if (selectedCharacterForView?.id === characterId) {
+          setSelectedCharacterForView(null);
+        }
+        alert("Character deleted from local data and session gallery.");
+      } catch (error: any) {
+        console.error("Failed to delete character:", error);
+        setApiError(`Failed to delete character: ${error.message || 'Unknown error'}`);
       }
     }
   };
   
-  const handleViewCharacterSheet = (char: CharacterData) => {
+  const handleViewCharacterSheet = (char: CharacterData | BestiaryEntry) => {
     setSelectedCharacterForView(char);
     setCurrentView('viewCharacterSheet');
   };
@@ -267,7 +314,7 @@ const App: React.FC = () => {
   const handleRaceSelection = (race: Race) => {
     if (race.subraces && race.subraces.length > 0) {
       setSelectedBaseRaceForSubChoice(race);
-      updateCharacter('race', undefined); // Clear current race selection
+      updateCharacter('race', undefined);
     } else {
       updateCharacter('race', race);
       setSelectedBaseRaceForSubChoice(null);
@@ -289,23 +336,17 @@ const App: React.FC = () => {
   const handleAbilityScoreMethodChange = (newMethod: AbilityScoreAssignmentMethod) => {
     if (!commonData) return;
     setAbilityScoreAssignmentMethod(newMethod);
-    
     let baseScoresToSet: AbilityScores;
     let availableScoresToSet: number[] = [];
-
     if (newMethod === 'standardArray') {
-      baseScoresToSet = { ...commonData.DEFAULT_ABILITY_SCORES }; // All 0s
+      baseScoresToSet = { ...commonData.DEFAULT_ABILITY_SCORES };
       availableScoresToSet = [...commonData.STANDARD_ARRAY_SCORES].sort((a,b) => b-a);
     } else if (newMethod === 'pointBuy') {
-      baseScoresToSet = { ...DEFAULT_SCORES_FOR_POINT_BUY }; // All 8s
-    } else { // manualRoll
-      baseScoresToSet = { ...DEFAULT_SCORES_FOR_MANUAL_ROLL }; // All 10s
+      baseScoresToSet = { ...DEFAULT_SCORES_FOR_POINT_BUY };
+    } else { 
+      baseScoresToSet = { ...DEFAULT_SCORES_FOR_MANUAL_ROLL };
     }
-    setCharacter(prev => ({
-      ...prev,
-      abilityScores: baseScoresToSet,
-      availableScores: availableScoresToSet,
-    }));
+    setCharacter(prev => ({ ...prev, abilityScores: baseScoresToSet, availableScores: availableScoresToSet }));
   };
 
   const handleGenerateBackstory = async () => {
@@ -338,13 +379,13 @@ const App: React.FC = () => {
   
   const nextCreationStep = () => {
     if (currentCreationStep === 1 && !character.race) { alert("Please select a race (and subrace, if applicable)."); return; }
-    if (currentCreationStep === 3) { // Ability Scores Validation
+    if (currentCreationStep === 3) {
         if (abilityScoreAssignmentMethod === 'standardArray' && character.availableScores.length > 0) {
             alert("Standard Array: Please assign all standard array ability scores."); return;
         }
         if (abilityScoreAssignmentMethod === 'manualRoll') {
             const scores = Object.values(character.abilityScores);
-            if (scores.some(s => s < MANUAL_ROLL_CONFIG.minScore || s > MANUAL_ROLL_CONFIG.maxScore || s === 0)) { // Check for 0 as unentered
+            if (scores.some(s => s < MANUAL_ROLL_CONFIG.minScore || s > MANUAL_ROLL_CONFIG.maxScore || s === 0)) {
                 alert(`Manual Entry: All ability scores must be entered and be between ${MANUAL_ROLL_CONFIG.minScore} and ${MANUAL_ROLL_CONFIG.maxScore}.`); return;
             }
         }
@@ -353,7 +394,6 @@ const App: React.FC = () => {
              if (scores.some(s => s < POINT_BUY_CONFIG.minScore || s > POINT_BUY_CONFIG.maxScore )) {
                  alert(`Point Buy: All base ability scores must be between ${POINT_BUY_CONFIG.minScore} and ${POINT_BUY_CONFIG.maxScore}.`); return;
             }
-            // Optionally, check if all points are spent or if that's allowed. For now, allow proceeding.
         }
     }
     if (currentCreationStep === 4 && character.charClass && selectedSkillChoices.length < character.charClass.skillProficiencies.choose && character.charClass.skillProficiencies.choose > 0) {
@@ -361,6 +401,7 @@ const App: React.FC = () => {
     }
     setCurrentCreationStep(s => Math.min(s + 1, TOTAL_CREATION_STEPS));
   };
+
   const prevCreationStep = () => {
     if (currentCreationStep === 1) {
       resetCreator(); 
@@ -378,7 +419,7 @@ const App: React.FC = () => {
     setSuggestedNames([]);
     setApiError(null);
     setSelectedBaseRaceForSubChoice(null);
-    setAbilityScoreAssignmentMethod('standardArray'); // Reset method
+    setAbilityScoreAssignmentMethod('standardArray');
     setCurrentCreationStep(1);
   }, [commonData]);
 
@@ -387,36 +428,37 @@ const App: React.FC = () => {
     setCurrentView('creation');
   };
 
-  const handleLoadCharactersFromFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLoadCharactersFromFile = (event: React.ChangeEvent<HTMLInputElement>) => { // For session backup loading
     const file = event.target.files?.[0];
     if (!file) return;
-
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         const text = e.target?.result as string;
         const parsedData = JSON.parse(text);
-        const charactersToLoad: CharacterData[] = [];
-
-        if (Array.isArray(parsedData)) {
-          if (parsedData.every(item => typeof item === 'object' && item !== null && 'id' in item && 'name' in item)) {
-             charactersToLoad.push(...parsedData as CharacterData[]);
-          } else {
-            throw new Error("File contains an array, but not all items are valid characters.");
-          }
-        } else if (typeof parsedData === 'object' && parsedData !== null && 'id' in parsedData && 'name' in parsedData) {
-          charactersToLoad.push(parsedData as CharacterData);
+        if (parsedData && parsedData.version && parsedData.savedCharacters) { // Basic check for session file structure
+            handleSessionBackupFileLoaded(parsedData as HeroForgeSessionData); // Use the session loader
+        } else if (Array.isArray(parsedData) || (typeof parsedData === 'object' && parsedData !== null && 'id' in parsedData)) {
+            // Attempt to load as individual character(s) if not a session file
+            const charactersToLoad: CharacterData[] = [];
+            if (Array.isArray(parsedData)) {
+                if (parsedData.every(item => typeof item === 'object' && item !== null && 'id' in item && 'name' in item)) {
+                    charactersToLoad.push(...parsedData as CharacterData[]);
+                } else {
+                    throw new Error("File contains an array, but not all items are valid characters.");
+                }
+            } else { // Single object
+                charactersToLoad.push(parsedData as CharacterData);
+            }
+            const finalCharacters = charactersToLoad.map(c => ({...c, source: c.source || 'pc-gallery-ai'}));
+            setSavedCharacters(prev => [...prev, ...finalCharacters.filter(fc => !prev.find(p => p.id === fc.id))]); // Avoid duplicates
+            alert(`${finalCharacters.length} character(s) loaded and added to the gallery. Remember to save your session to persist this change.`);
         } else {
-          throw new Error("Invalid JSON format. Expected a character object or an array of characters.");
+            throw new Error("Invalid JSON format. Expected a session backup file, a character object, or an array of characters.");
         }
-        
-        const finalCharacters = charactersToLoad.map(c => ({...c, source: c.source || 'pc-gallery-ai'}));
-        setSavedCharacters(prev => [...prev, ...finalCharacters]);
-        alert(`${finalCharacters.length} character(s) loaded and added to the gallery for this session. Remember to save your session to persist this change.`);
-
       } catch (err: any) {
-        console.error("Error loading characters from file:", err);
-        alert(`Failed to load characters: ${err.message}`);
+        console.error("Error loading from file:", err);
+        alert(`Failed to load: ${err.message}`);
       }
     };
     reader.onerror = () => { alert("Error reading file."); };
@@ -424,7 +466,7 @@ const App: React.FC = () => {
     event.target.value = ''; 
   };
 
-  const handleExportAllGalleryCharacters = () => {
+  const handleExportAllGalleryCharacters = () => { // For backup
     if (savedCharacters.length === 0) {
       alert("No characters in the current gallery session to export.");
       return;
@@ -433,11 +475,11 @@ const App: React.FC = () => {
     alert(`${savedCharacters.length} characters from the current gallery session prepared for download.`);
   };
 
-  const handleExportSessionData = () => {
+  const handleExportSessionData = () => { // For backup
     const sessionData: HeroForgeSessionData = {
       version: APP_VERSION,
       savedCharacters: savedCharacters,
-      aiGeneratedRaces: aiRacesData.map(({source, ...rest}) => rest) as Race[], 
+      aiGeneratedRaces: aiRacesData.map(({source, ...rest}) => rest) as Race[],
       aiGeneratedClasses: aiClassesData.map(({source, ...rest}) => rest) as CharClass[],
       aiGeneratedBackgrounds: aiBackgroundsData.map(({source, ...rest}) => rest) as Background[],
       aiGeneratedBestiaryEntries: aiBestiaryEntries, 
@@ -446,85 +488,172 @@ const App: React.FC = () => {
     alert("All session data prepared for download. Save this file to restore your session later.");
   };
 
-
-  // --- AI Content Studio Callbacks ---
-  const handleSaveNewRace = (newRace: Race) => {
+  const handleSaveNewRace = async (newRace: Race) => {
     const raceWithSource = {...newRace, source: 'user-ai' as 'user-ai'};
-    setAiRacesData(prev => {
-        const existingIndex = prev.findIndex(r => r.name === raceWithSource.name);
-        if (existingIndex > -1) {
-            const updated = [...prev];
-            updated[existingIndex] = raceWithSource;
-            return updated;
-        }
-        return [...prev, raceWithSource];
-    });
-    alert(`Race "${newRace.name}" added to session! It's now available in character creation. Remember to save your session to persist this change.`);
+    try {
+      await electronAppService.saveAiRace(raceWithSource);
+      setAiRacesData(prev => {
+          const existingIndex = prev.findIndex(r => r.name === raceWithSource.name);
+          if (existingIndex > -1) {
+              const updated = [...prev];
+              updated[existingIndex] = raceWithSource;
+              return updated;
+          }
+          return [...prev, raceWithSource];
+      });
+      alert(`Race "${newRace.name}" saved locally and added to session!`);
+    } catch (error: any) {
+      console.error("Error saving AI Race:", error);
+      setApiError(`Failed to save AI Race: ${error.message || 'Unknown error'}`);
+    }
   };
-  const handleSaveNewClass = (newClass: CharClass) => {
+
+  const handleSaveNewClass = async (newClass: CharClass) => {
     const classWithSource = {...newClass, source: 'user-ai' as 'user-ai'};
-    setAiClassesData(prev => {
-        const existingIndex = prev.findIndex(c => c.name === classWithSource.name);
-        if (existingIndex > -1) {
-            const updated = [...prev];
-            updated[existingIndex] = classWithSource;
-            return updated;
-        }
-        return [...prev, classWithSource];
-    });
-     alert(`Class "${newClass.name}" added to session! It's now available in character creation. Remember to save your session to persist this change.`);
+     try {
+      await electronAppService.saveAiClass(classWithSource);
+      setAiClassesData(prev => {
+          const existingIndex = prev.findIndex(c => c.name === classWithSource.name);
+          if (existingIndex > -1) {
+              const updated = [...prev];
+              updated[existingIndex] = classWithSource;
+              return updated;
+          }
+          return [...prev, classWithSource];
+      });
+      alert(`Class "${newClass.name}" saved locally and added to session!`);
+    } catch (error: any) {
+      console.error("Error saving AI Class:", error);
+      setApiError(`Failed to save AI Class: ${error.message || 'Unknown error'}`);
+    }
   };
-  const handleSaveNewBackground = (newBackground: Background) => {
+
+  const handleSaveNewBackground = async (newBackground: Background) => {
     const backgroundWithSource = {...newBackground, source: 'user-ai' as 'user-ai'};
-    setAiBackgroundsData(prev => {
-        const existingIndex = prev.findIndex(b => b.name === backgroundWithSource.name);
-        if (existingIndex > -1) {
-            const updated = [...prev];
-            updated[existingIndex] = backgroundWithSource;
-            return updated;
-        }
-        return [...prev, backgroundWithSource];
-    });
-     alert(`Background "${newBackground.name}" added to session! It's now available in character creation. Remember to save your session to persist this change.`);
+    try {
+      await electronAppService.saveAiBackground(backgroundWithSource);
+      setAiBackgroundsData(prev => {
+          const existingIndex = prev.findIndex(b => b.name === backgroundWithSource.name);
+          if (existingIndex > -1) {
+              const updated = [...prev];
+              updated[existingIndex] = backgroundWithSource;
+              return updated;
+          }
+          return [...prev, backgroundWithSource];
+      });
+      alert(`Background "${newBackground.name}" saved locally and added to session!`);
+    } catch (error: any) {
+      console.error("Error saving AI Background:", error);
+      setApiError(`Failed to save AI Background: ${error.message || 'Unknown error'}`);
+    }
   };
-  const handleSaveNewAiCharacter = (newCharData: CharacterData, destination: AiCharacterSaveDestination) => {
+
+  const handleSaveNewAiCharacter = async (newCharData: CharacterData, destination: AiCharacterSaveDestination) => {
     const characterWithId = { ...newCharData, id: newCharData.id || generateCharacterId() };
     if (destination === 'bestiary') {
       const entryWithSource = {...characterWithId, source: 'bestiary-ai' as 'bestiary-ai'};
-      setAiBestiaryEntries(prev => {
-          const existingIndex = prev.findIndex(e => e.id === entryWithSource.id);
-          if (existingIndex > -1) {
-              const updated = [...prev];
-              updated[existingIndex] = entryWithSource;
-              return updated;
-          }
-          return [...prev, entryWithSource];
-      });
-      alert(`"${entryWithSource.name}" added to Bestiary for this session! Remember to save your session to persist this change.`);
-    } else { // 'gallery'
-      const characterToDownload: CharacterData = {
+      try {
+        await electronAppService.saveAiBestiaryEntry(entryWithSource);
+        setAiBestiaryEntries(prev => {
+            const existingIndex = prev.findIndex(e => e.id === entryWithSource.id);
+            if (existingIndex > -1) {
+                const updated = [...prev];
+                updated[existingIndex] = entryWithSource;
+                return updated;
+            }
+            return [...prev, entryWithSource];
+        });
+        alert(`"${entryWithSource.name}" saved to local Bestiary and added to session!`);
+      } catch (error: any) {
+        console.error("Error saving AI Bestiary Entry:", error);
+        setApiError(`Failed to save AI Bestiary Entry: ${error.message || 'Unknown error'}`);
+      }
+    } else { 
+      const characterToSave: CharacterData = {
         ...characterWithId,
         imageUrl: characterWithId.imageUrl || DEFAULT_IMAGE_URL,
         source: 'pc-gallery-ai'
       };
-      const filename = `${characterToDownload.name.replace(/\s+/g, '_') || 'ai_character'}_${characterToDownload.id}.json`;
-      downloadJson(characterToDownload, filename); 
-      setSavedCharacters(prev => [...prev, characterToDownload]);
-      alert(`AI Character "${characterToDownload.name}" data prepared for download as ${filename}. Also added to current session gallery. Remember to save your session to persist this change.`);
+      try {
+        await electronAppService.saveCharacter(characterToSave);
+        setSavedCharacters(prev => {
+            const existingIndex = prev.findIndex(c => c.id === characterToSave.id);
+            if (existingIndex > -1) {
+                const updated = [...prev];
+                updated[existingIndex] = characterToSave;
+                return updated;
+            }
+            return [...prev, characterToSave];
+        });
+        alert(`AI Character "${characterToSave.name}" saved locally. Also added to current session gallery.`);
+      } catch (error: any) {
+        console.error("Error saving AI Character to gallery:", error);
+        setApiError(`Failed to save AI Character: ${error.message || 'Unknown error'}`);
+      }
     }
   };
 
+  const handleDeleteAiRace = async (raceName: string) => {
+    if (!window.confirm(`Are you sure you want to delete the AI Race "${raceName}" from your local files? This action cannot be undone.`)) return;
+    try {
+      await electronAppService.deleteAiRace(raceName);
+      setAiRacesData(prev => prev.filter(r => r.name !== raceName));
+      alert(`AI Race "${raceName}" deleted from local files.`);
+    } catch (error: any) {
+      console.error("Error deleting AI Race:", error);
+      setApiError(`Failed to delete AI Race: ${error.message || 'Unknown error'}`);
+    }
+  };
 
-  if (isLoadingStaticData || (currentView !== 'initialLoad' && !commonData)) {
+   const handleDeleteAiClass = async (className: string) => {
+    if (!window.confirm(`Are you sure you want to delete the AI Class "${className}" from your local files? This action cannot be undone.`)) return;
+    try {
+      await electronAppService.deleteAiClass(className);
+      setAiClassesData(prev => prev.filter(c => c.name !== className));
+      alert(`AI Class "${className}" deleted from local files.`);
+    } catch (error: any) {
+      console.error("Error deleting AI Class:", error);
+      setApiError(`Failed to delete AI Class: ${error.message || 'Unknown error'}`);
+    }
+  };
+
+  const handleDeleteAiBackground = async (backgroundName: string) => {
+    if (!window.confirm(`Are you sure you want to delete the AI Background "${backgroundName}" from your local files? This action cannot be undone.`)) return;
+    try {
+      await electronAppService.deleteAiBackground(backgroundName);
+      setAiBackgroundsData(prev => prev.filter(b => b.name !== backgroundName));
+      alert(`AI Background "${backgroundName}" deleted from local files.`);
+    } catch (error: any) {
+      console.error("Error deleting AI Background:", error);
+      setApiError(`Failed to delete AI Background: ${error.message || 'Unknown error'}`);
+    }
+  };
+
+  const handleDeleteAiBestiaryEntry = async (entryId: string, entryName?: string) => {
+    const confirmMsg = entryName 
+      ? `Are you sure you want to delete the Bestiary Entry "${entryName}" (ID: ${entryId}) from your local files? This action cannot be undone.`
+      : `Are you sure you want to delete the Bestiary Entry (ID: ${entryId}) from your local files? This action cannot be undone.`;
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await electronAppService.deleteAiBestiaryEntry(entryId);
+      setAiBestiaryEntries(prev => prev.filter(e => e.id !== entryId));
+      alert(`Bestiary Entry "${entryName || entryId}" deleted from local files.`);
+    } catch (error: any) {
+      console.error("Error deleting AI Bestiary Entry:", error);
+      setApiError(`Failed to delete AI Bestiary Entry: ${error.message || 'Unknown error'}`);
+    }
+  };
+
+  if (isLoadingStaticData || isLoadingLocalData) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-slate-50">
-        <LoadingSpinner size="lg" message="Forging the anvils... loading core data..." />
+        <LoadingSpinner size="lg" message={isLoadingStaticData ? "Forging the anvils... loading core data..." : "Unearthing your legends... loading saved data..."} />
       </div>
     );
   }
   
-  if (currentView === 'initialLoad') {
-    return <InitialLoadView onDataLoaded={handleSessionDataLoaded} onStartFresh={initializeWithFreshData} />;
+  if (currentView === 'initialLoad' && !isLoadingLocalData && !isLoadingStaticData) {
+    return <InitialLoadView onSessionFileLoaded={handleSessionBackupFileLoaded} onStartFresh={initializeWithFreshData} />;
   }
 
   const renderCreationStepContent = () => {
@@ -637,7 +766,7 @@ const App: React.FC = () => {
                 <AbilityScoreAllocator 
                     initialScores={character.abilityScores} 
                     racialBonuses={character.race?.abilityScoreBonuses || {}}
-                    availableStandardScores={character.availableScores} // Only used by standard array method
+                    availableStandardScores={character.availableScores} 
                     standardArray={commonData.STANDARD_ARRAY_SCORES}
                     onScoresUpdate={handleAbilityScoresUpdate} 
                     method={abilityScoreAssignmentMethod}
@@ -648,7 +777,6 @@ const App: React.FC = () => {
       case 4: 
         if (!character.charClass) { return <p>Please select a class first to see skill options.</p>; }
         if (character.charClass.skillProficiencies.choose === 0) {
-            // Automatically advance if no choices. Use setTimeout to avoid issues with state updates during render.
             if (currentCreationStep === 4) setTimeout(() => setCurrentCreationStep(5), 0); 
             return <p>No skills to choose for this class. Moving to next step...</p>;
         }
@@ -753,17 +881,14 @@ const App: React.FC = () => {
                         placeholder="Craft your character's history or let AI inspire you..."></textarea>
             </div>
             {isLoadingAI && <LoadingSpinner message="AI is conjuring..."/>}
-            {apiError && <p className="text-red-500 text-sm bg-red-50 p-2 rounded-md">{apiError}</p>}
+            {apiError && (currentView === 'creation') && <p className="text-red-500 text-sm bg-red-50 p-2 rounded-md">{apiError}</p>}
           </div>
         );
       case TOTAL_CREATION_STEPS: 
         if (!character.race || !character.charClass || !character.background) {
             return <div className="p-6 text-center text-xl text-red-600 bg-red-50 rounded-lg shadow-md">Character data incomplete. Please go back.</div>;
         }
-        const reviewCharacter = {
-            ...character,
-            imageUrl: character.imageUrl || DEFAULT_IMAGE_URL 
-        };
+        const reviewCharacter = { ...character, imageUrl: character.imageUrl || DEFAULT_IMAGE_URL };
         return <CharacterSheetDisplay character={reviewCharacter} allSkills={skillsData} />;
       default:
         return <div>Unknown step.</div>;
@@ -793,7 +918,7 @@ const App: React.FC = () => {
               <p className="text-center text-sm text-slate-600 mt-1">Step {currentCreationStep} of {TOTAL_CREATION_STEPS}</p>
             </div>
             <main className="bg-slate-50 p-6 sm:p-8 rounded-xl shadow-2xl border border-gray-300">
-              {isLoadingStaticData ? <LoadingSpinner message="Loading character options..." /> : renderCreationStepContent()}
+              {renderCreationStepContent()}
             </main>
             <footer className="mt-10 flex flex-col sm:flex-row justify-between items-center space-y-4 sm:space-y-0 sm:space-x-4">
               <button onClick={prevCreationStep} 
@@ -809,7 +934,7 @@ const App: React.FC = () => {
               {currentCreationStep === TOTAL_CREATION_STEPS ? (
                  <button onClick={handleSaveCharacter}
                          className="px-8 py-3 bg-green-600 text-white rounded-lg shadow-md hover:bg-green-700 transition-colors text-lg font-medium w-full sm:w-auto">
-                    Save & Download Character
+                    Save Character
                 </button>
               ) : (
                 <button onClick={nextCreationStep}
@@ -827,58 +952,95 @@ const App: React.FC = () => {
                   onDeleteCharacter={handleDeleteCharacter} 
                   onNavigateToMenu={() => setCurrentView('menu')}
                   onNavigateToCreation={navigateToCreation}
-                  onLoadCharacters={handleLoadCharactersFromFile}
-                  onExportAllCharacters={handleExportAllGalleryCharacters}
+                  onLoadCharacters={handleLoadCharactersFromFile} // This is for session/multi-char backup
+                  onExportAllCharacters={handleExportAllGalleryCharacters} // This is for session/multi-char backup
                 />;
       case 'bestiary':
         return <Bestiary 
-                  entries={aiBestiaryEntries} 
+                  entries={aiBestiaryEntries}
                   onNavigateToMenu={() => setCurrentView('menu')}
                   onViewEntry={handleViewCharacterSheet}
+                  onDeleteEntry={handleDeleteAiBestiaryEntry}
                 />;
-      case 'aiContentStudio': 
-        return <AIContentStudio 
+      case 'aiContentStudio':
+        return <AIContentStudio
                   onNavigateToMenu={() => setCurrentView('menu')}
                   onSaveRace={handleSaveNewRace}
                   onSaveClass={handleSaveNewClass}
                   onSaveBackground={handleSaveNewBackground}
                   onSaveAiCharacter={handleSaveNewAiCharacter}
+                  existingRaces={aiRacesData} 
+                  existingClasses={aiClassesData}
+                  existingBackgrounds={aiBackgroundsData}
+                  onDeleteRace={handleDeleteAiRace} 
+                  onDeleteClass={handleDeleteAiClass}
+                  onDeleteBackground={handleDeleteAiBackground}
                 />;
       case 'viewCharacterSheet':
         if (!selectedCharacterForView) {
-          setCurrentView('gallery'); 
-          return <p>No character selected.</p>;
+          setCurrentView(savedCharacters.length > 0 ? 'gallery' : 'menu');
+          return <p>No character selected. Returning to list...</p>;
         }
+        const isFromBestiary = aiBestiaryEntries.some(entry => entry.id === selectedCharacterForView.id) || selectedCharacterForView.source?.startsWith('bestiary');
         return (
           <div className="w-full">
-            <CharacterSheetDisplay character={selectedCharacterForView} allSkills={skillsData} />
+            <CharacterSheetDisplay character={selectedCharacterForView as CharacterData} allSkills={skillsData} />
             <div className="mt-8 flex justify-center space-x-4">
-                <button 
-                    onClick={() => { 
-                        const fromGallery = selectedCharacterForView.source === 'pc-gallery-ai' || savedCharacters.find(c => c.id === selectedCharacterForView.id);
-                        setSelectedCharacterForView(null); 
-                        setCurrentView(fromGallery ? 'gallery' : 'bestiary'); 
+                <button
+                    onClick={() => {
+                        setSelectedCharacterForView(null);
+                        setCurrentView(isFromBestiary ? 'bestiary' : 'gallery');
                     }}
                     className="px-6 py-3 bg-slate-600 text-white rounded-lg shadow-md hover:bg-slate-700 transition-colors text-lg font-medium"
                 >
                     Back to List
                 </button>
-                 { (selectedCharacterForView.source === 'pc-gallery-ai' || savedCharacters.find(c => c.id === selectedCharacterForView.id)) &&
-                    <button 
+                 { !isFromBestiary && savedCharacters.some(c => c.id === selectedCharacterForView.id) &&
+                    <button
                         onClick={() => handleDeleteCharacter(selectedCharacterForView.id)}
                         className="px-6 py-3 bg-red-600 text-white rounded-lg shadow-md hover:bg-red-700 transition-colors text-lg font-medium"
                     >
-                        Remove from Session
+                        Delete Character
                     </button>
                  }
+                  { isFromBestiary && aiBestiaryEntries.some(e => e.id === selectedCharacterForView.id) &&
+                    <button
+                        onClick={() => handleDeleteAiBestiaryEntry(selectedCharacterForView.id, selectedCharacterForView.name)}
+                        className="px-6 py-3 bg-red-700 text-white rounded-lg shadow-md hover:bg-red-800 transition-colors text-lg font-medium"
+                    >
+                        Delete Bestiary Entry
+                    </button>
+                  }
             </div>
           </div>
         );
       default:
-        return <p>Error: Unknown view.</p>;
+        setCurrentView('menu');
+        return <p>Error: Unknown view. Returning to menu...</p>;
     }
   };
   
+  if (apiError && (currentView !== 'creation' && currentView !== 'aiContentStudio')) {
+    return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-slate-100 p-4">
+            <div className="bg-white p-8 rounded-lg shadow-xl text-center">
+                <h2 className="text-3xl font-bold text-red-600 mb-4">An Error Occurred</h2>
+                <p className="text-slate-700 mb-6">{apiError}</p>
+                <button 
+                    onClick={() => {
+                        setApiError(null); 
+                        if (isLoadingStaticData || isLoadingLocalData) setCurrentView('initialLoad');
+                        else setCurrentView('menu');
+                    }}
+                    className="px-6 py-3 bg-orange-600 text-white rounded-lg shadow-md hover:bg-orange-700 transition-colors"
+                >
+                    Try to Reload App
+                </button>
+            </div>
+        </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col py-8 px-4 sm:px-6 lg:px-8">
       <div className="max-w-5xl mx-auto w-full flex-grow flex flex-col">
@@ -893,10 +1055,26 @@ const App: React.FC = () => {
         <div className="flex-grow">
           {renderContent()}
         </div>
+        
+        {apiError && (currentView === 'creation' || currentView === 'aiContentStudio') && (
+            <div className="fixed bottom-4 right-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg shadow-lg z-50 max-w-sm">
+                <div className="flex">
+                    <div className="py-1"><svg className="fill-current h-6 w-6 text-red-500 mr-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M2.93 17.07A10 10 0 1 1 17.07 2.93 10 10 0 0 1 2.93 17.07zM10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm-.88-3.12a1 1 0 1 1 1.76 0 1 1 0 0 1-1.76 0zM10 5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0V6a1 1 0 0 1 1-1z"/></svg></div>
+                    <div>
+                        <p className="font-bold">Error</p>
+                        <p className="text-sm">{apiError}</p>
+                    </div>
+                    <button onClick={() => setApiError(null)} className="ml-auto -mx-1.5 -my-1.5 bg-red-100 text-red-500 rounded-lg focus:ring-2 focus:ring-red-400 p-1.5 hover:bg-red-200 inline-flex h-8 w-8" aria-label="Dismiss">
+                        <span className="sr-only">Dismiss</span>
+                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"></path></svg>
+                    </button>
+                </div>
+            </div>
+        )}
 
         <p className="text-center text-xs text-slate-500 mt-12 pb-4">
           Ensure your API_KEY environment variable is set for AI features.
-          Character data and AI content are managed within your session. Use "Export All Session Data" to save.
+          Content is saved locally to your computer. Use "Export All Session Data" for backups.
         </p>
       </div>
     </div>
